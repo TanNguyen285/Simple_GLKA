@@ -216,3 +216,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# =====================================================================
+# AUTOMATIC TRAFFIC DATASET FILTER
+# =====================================================================
+
+# 1. Chặn toàn bộ tất cả các file nằm trong các thư mục class
+dataset/train/*/*
+dataset/val/*/*
+
+# 2. NGOẠI LỆ: Tự động nhận diện và đẩy các ảnh mẫu lên GitHub
+# Cho phép lấy mọi ảnh bắt đầu bằng chữ 'train' nằm trong các class của train/
+!dataset/train/*/train*
+
+# Cho phép lấy mọi ảnh bắt đầu bằng chữ 'val' nằm trong các class của val/
+!dataset/val/*/val*
