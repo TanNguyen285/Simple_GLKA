@@ -169,8 +169,23 @@ class Simple_GLKA(nn.Module):
 
 if __name__ == "__main__":
     import copy
+    import sys
+    import os
+    
+    # Import config từ Train_AI folder
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(current_dir)
+    train_ai_dir = os.path.join(parent_dir, 'Train_AI')
+    if train_ai_dir not in sys.path:
+        sys.path.insert(0, train_ai_dir)
+    
+    try:
+        from config import config
+        num_classes = config.NUM_CLASSES
+    except:
+        num_classes = 2
 
-    model = Simple_GLKA(num_classes=2).eval()
+    model = Simple_GLKA(num_classes=num_classes).eval()
     
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Kiến trúc GLKA Net")

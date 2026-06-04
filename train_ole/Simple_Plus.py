@@ -3,12 +3,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class GLKA(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, dim, out_dim=None, stride=1):
         super().__init__()
         self.dim = dim
-        self.K = 13  # [FIX 1] thiếu self.K → crash khi switch_to_deploy()
+        self.out_dim = out_dim if out_dim is not None else dim  # ← thêm out_dim
+        self.K = 13
+        self.stride = stride
 
-        self.conv0 = nn.Conv2d(dim, dim, 5, padding=2, groups=dim)
+        self.conv0 = nn.Conv2d(dim, dim, 5, stride=stride, padding=2, groups=dim)
         
         self.se = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
@@ -35,73 +37,61 @@ class GLKA(nn.Module):
             nn.BatchNorm2d(dim)
         )
 
+        # ← conv_mix thay thế cho conv1x1 bên ngoài, dim → out_dim
+        self.conv_mix = nn.Sequential(
+            nn.Conv2d(dim, self.out_dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(self.out_dim),
+        )
+
         self.reparam_conv = None
 
     def forward(self, x):
-        # Conv5x5 depthwise tạo feature map chung cho cả 4 branch
         global_conv = self.conv0(x)
-        # SE attention gate
         anchor = global_conv * self.se(global_conv)
         
         if self.reparam_conv is not None:
             branch_main = self.reparam_conv(global_conv)
         else:
-            branch_main = (self.branch1(global_conv) + self.branch2(global_conv) +
-                           self.branch3(global_conv) + self.branch4(global_conv))
+            branch_main = self.branch1(global_conv) + self.branch2(global_conv) + \
+                          self.branch3(global_conv) + self.branch4(global_conv)
         
-        return anchor * branch_main
+        # ← mix ngay tại đây, bỏ phép nhân raw ra ngoài
+        return self.conv_mix(anchor * branch_main)
 
     def switch_to_deploy(self):
-        if not hasattr(self, "branch1"):
-            return
         w1, b1 = self._fuse_bn(self.branch1)
         w2, b2 = self._fuse_bn(self.branch2)
         w3, b3 = self._fuse_bn(self.branch3)
         w4, b4 = self._fuse_bn(self.branch4)
 
-        W_equiv = (self._to_target_k(w1, d=1) + self._to_target_k(w2, d=3) +
-                   self._to_target_k(w3, d=2) + self._to_target_k(w4, d=3))
+        W_equiv = self._to_target_k(w1, 1) + self._to_target_k(w2, 3) + \
+                  self._to_target_k(w3, 2) + self._to_target_k(w4, 3)
         B_equiv = b1 + b2 + b3 + b4
         
-        self.reparam_conv = nn.Conv2d(
-            self.dim, self.dim, self.K,
-            padding=self.K // 2,
-            groups=self.dim,
-            bias=True
-        )
+        self.reparam_conv = nn.Conv2d(self.dim, self.dim, self.K, padding=self.K//2, groups=self.dim)
         self.reparam_conv.weight.data = W_equiv
-        self.reparam_conv.bias.data   = B_equiv
+        self.reparam_conv.bias.data = B_equiv
         
         del self.branch1, self.branch2, self.branch3, self.branch4
 
     def _fuse_bn(self, sequential_block):
         conv = sequential_block[0]
-        bn   = sequential_block[1]
-        std  = (bn.running_var + bn.eps).sqrt()
-        t    = (bn.weight / std).reshape(-1, 1, 1, 1)
-        # [FIX 1] công thức đúng: không bỏ conv.bias
-        b_conv  = conv.bias if conv.bias is not None else \
-                  torch.zeros(conv.out_channels, device=conv.weight.device)
-        w_fused = conv.weight * t
-        b_fused = bn.bias + (b_conv - bn.running_mean) * bn.weight / std
-        return w_fused, b_fused
+        bn = sequential_block[1]
+        std = (bn.running_var + bn.eps).sqrt()
+        t = (bn.weight / std).reshape(-1, 1, 1, 1)
+        fused_weight = conv.weight * t
+        fused_bias = bn.bias - bn.running_mean * bn.weight / std
+        return fused_weight, fused_bias
 
-    def _to_target_k(self, kernel, d):
-        c, m, orig_k, _ = kernel.shape
+    def _to_target_k(self, k, d):
+        c, m, orig_k, _ = k.shape
         kd = (orig_k - 1) * d + 1
-        # [FIX 2] tạo thẳng tensor K×K, căn giữa đúng — không dùng F.pad
-        out    = torch.zeros((c, m, self.K, self.K),
-                             device=kernel.device, dtype=kernel.dtype)
-        offset = (self.K - kd) // 2
-        out[:, :, offset : offset + kd : d,
-                   offset : offset + kd : d] = kernel
-        return out
+        sparse = torch.zeros((c, m, kd, kd), device=k.device)
+        sparse[:, :, ::d, ::d] = k
+        pad = (self.K - kd) // 2
+        return F.pad(sparse, [pad, pad, pad, pad])
 
 
-
-# =================================================================
-# 2. CÁC THÀNH PHẦN BỔ TRỢ CỦA MẠNG (EFFICIENT BLOCK)
-# =================================================================
 def conv_bn_relu(in_channels, out_channels, kernel_size, stride=1, padding=0, groups=1):
     return nn.Sequential(
         nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, groups=groups, bias=False),
@@ -117,39 +107,35 @@ class EfficientBlock(nn.Module):
         self.use_residual = (stride == 1 and in_channels == out_channels)
         hidden_dim = in_channels * expansion_ratio
 
+        # 1. Expand
         self.expand = conv_bn_relu(in_channels, hidden_dim, kernel_size=1)
         
+        # 2. Spatial Processing
         if self.use_glka:
-            if self.stride == 2:
-                self.dw = conv_bn_relu(hidden_dim, hidden_dim, kernel_size=3, stride=2, padding=1, groups=hidden_dim)
-                self.glka = GLKA(hidden_dim)
-            else:
-                self.dw = nn.Identity() 
-                self.glka = GLKA(hidden_dim)
+            # ← GLKA tự mix ra out_channels luôn, không cần project nữa
+            self.spatial = GLKA(hidden_dim, out_dim=out_channels, stride=stride)
         else:
-            self.dw = conv_bn_relu(hidden_dim, hidden_dim, kernel_size=3, stride=stride, padding=1, groups=hidden_dim)
-            self.glka = nn.Identity()
-
-        self.project = nn.Sequential(
-            nn.Conv2d(hidden_dim, out_channels, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(out_channels),
-        )
+            # DW chuẩn + project giữ nguyên
+            self.spatial = conv_bn_relu(hidden_dim, hidden_dim, kernel_size=3, stride=stride, padding=1, groups=hidden_dim)
+            self.project = nn.Sequential(
+                nn.Conv2d(hidden_dim, out_channels, kernel_size=1, bias=False),
+                nn.BatchNorm2d(out_channels),
+            )
 
     def forward(self, x):
         identity = x
         out = self.expand(x)
-        out = self.dw(out)  
-        out = self.glka(out) 
-        out = self.project(out)
+        out = self.spatial(out)
+
+        # ← chỉ project khi không dùng GLKA (GLKA đã mix ra out_channels rồi)
+        if not self.use_glka:
+            out = self.project(out)
         
         if self.use_residual:
             return identity + out
         return out
 
 
-# =================================================================
-# 3. KIẾN TRÚC TỔNG THỂ SIMPLE_GLKA
-# =================================================================
 class Simple_GLKA(nn.Module):
     def __init__(self, num_classes=2):
         super(Simple_GLKA, self).__init__()
@@ -157,10 +143,10 @@ class Simple_GLKA(nn.Module):
         self.stem = conv_bn_relu(3, 32, kernel_size=3, stride=2, padding=1)
 
         self.blocks = nn.Sequential(
-            EfficientBlock(32, 32, stride=1, expansion_ratio=2, use_glka=False),
-            EfficientBlock(32, 64, stride=2, expansion_ratio=2, use_glka=True),
-            EfficientBlock(64, 64, stride=1, expansion_ratio=2, use_glka=True),
-            EfficientBlock(64, 128, stride=2, expansion_ratio=2, use_glka=True),
+            EfficientBlock(32,  32,  stride=1, expansion_ratio=2, use_glka=False),
+            EfficientBlock(32,  64,  stride=2, expansion_ratio=2, use_glka=True),
+            EfficientBlock(64,  64,  stride=1, expansion_ratio=2, use_glka=True),
+            EfficientBlock(64,  128, stride=2, expansion_ratio=2, use_glka=True),
             EfficientBlock(128, 128, stride=1, expansion_ratio=2, use_glka=False),
             EfficientBlock(128, 256, stride=2, expansion_ratio=2, use_glka=False),
         )
@@ -177,32 +163,14 @@ class Simple_GLKA(nn.Module):
         x = self.blocks(x)
         x = self.classifier_pool(x)
         features = torch.flatten(x, 1)
-        out = self.classifier_fc(features)  # [FIX 3] dùng features thay vì x
+        out = self.classifier_fc(features)
         return out, features
 
 
-# =================================================================
-# KIỂM TRA MÔ HÌNH
-# =================================================================
 if __name__ == "__main__":
     import copy
-    import sys
-    import os
-    
-    # Import config từ Train_AI folder
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    parent_dir = os.path.dirname(current_dir)
-    train_ai_dir = os.path.join(parent_dir, 'Train_AI')
-    if train_ai_dir not in sys.path:
-        sys.path.insert(0, train_ai_dir)
-    
-    try:
-        from config import config
-        num_classes = config.NUM_CLASSES
-    except:
-        num_classes = 2
 
-    model = Simple_GLKA(num_classes=num_classes).eval()
+    model = Simple_GLKA(num_classes=2).eval()
     
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Kiến trúc GLKA Net")
@@ -212,11 +180,10 @@ if __name__ == "__main__":
     with torch.no_grad():
         out, features = model(test_input)
     
-    print(f"Input: {test_input.shape}")
-    print(f"Output (Logits): {out.shape}") 
-    print(f"Features vector: {features.shape}")
+    print(f"Input:          {test_input.shape}")
+    print(f"Output (Logits):{out.shape}") 
+    print(f"Features vector:{features.shape}")
 
-    # Xác nhận deploy cho output giống hệt train
     model_deploy = copy.deepcopy(model)
     for m in model_deploy.modules():
         if isinstance(m, GLKA):

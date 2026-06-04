@@ -38,65 +38,51 @@ class GLKA(nn.Module):
         self.reparam_conv = None
 
     def forward(self, x):
-        # Conv5x5 depthwise tạo feature map chung cho cả 4 branch
-        global_conv = self.conv0(x)
-        # SE attention gate
+        global_conv = self.conv0(x) #Conv5x5, padding=2, groups=dim dùng để tạo feature map chung cho cả 4 branch sau đó mới áp attention và conv riêng biệt cho từng branch
         anchor = global_conv * self.se(global_conv)
         
         if self.reparam_conv is not None:
-            branch_main = self.reparam_conv(global_conv)
+            branch_main = self.reparam_conv(global_conv) #chỉ dùng conv đã gộp sau khi deploy
         else:
-            branch_main = (self.branch1(global_conv) + self.branch2(global_conv) +
-                           self.branch3(global_conv) + self.branch4(global_conv))
+            branch_main = self.branch1(global_conv) + self.branch2(global_conv) + \
+                          self.branch3(global_conv) + self.branch4(global_conv)
         
-        return anchor * branch_main
+        return anchor*branch_main
 
     def switch_to_deploy(self):
-        if not hasattr(self, "branch1"):
-            return
         w1, b1 = self._fuse_bn(self.branch1)
         w2, b2 = self._fuse_bn(self.branch2)
         w3, b3 = self._fuse_bn(self.branch3)
         w4, b4 = self._fuse_bn(self.branch4)
 
-        W_equiv = (self._to_target_k(w1, d=1) + self._to_target_k(w2, d=3) +
-                   self._to_target_k(w3, d=2) + self._to_target_k(w4, d=3))
+        # [FIX 2] d phải khớp dilation thực tế của từng conv
+        # branch1: dilation=1, branch2: dilation=3, branch3: dilation=2, branch4: dilation=3
+        W_equiv = self._to_target_k(w1, 1) + self._to_target_k(w2, 3) + \
+                  self._to_target_k(w3, 2) + self._to_target_k(w4, 3)
         B_equiv = b1 + b2 + b3 + b4
         
-        self.reparam_conv = nn.Conv2d(
-            self.dim, self.dim, self.K,
-            padding=self.K // 2,
-            groups=self.dim,
-            bias=True
-        )
+        self.reparam_conv = nn.Conv2d(self.dim, self.dim, self.K, padding=self.K//2, groups=self.dim)
         self.reparam_conv.weight.data = W_equiv
-        self.reparam_conv.bias.data   = B_equiv
+        self.reparam_conv.bias.data = B_equiv
         
         del self.branch1, self.branch2, self.branch3, self.branch4
 
     def _fuse_bn(self, sequential_block):
         conv = sequential_block[0]
-        bn   = sequential_block[1]
-        std  = (bn.running_var + bn.eps).sqrt()
-        t    = (bn.weight / std).reshape(-1, 1, 1, 1)
-        # [FIX 1] công thức đúng: không bỏ conv.bias
-        b_conv  = conv.bias if conv.bias is not None else \
-                  torch.zeros(conv.out_channels, device=conv.weight.device)
-        w_fused = conv.weight * t
-        b_fused = bn.bias + (b_conv - bn.running_mean) * bn.weight / std
-        return w_fused, b_fused
+        bn = sequential_block[1]
+        std = (bn.running_var + bn.eps).sqrt()
+        t = (bn.weight / std).reshape(-1, 1, 1, 1)
+        fused_weight = conv.weight * t
+        fused_bias = bn.bias - bn.running_mean * bn.weight / std
+        return fused_weight, fused_bias
 
-    def _to_target_k(self, kernel, d):
-        c, m, orig_k, _ = kernel.shape
+    def _to_target_k(self, k, d):
+        c, m, orig_k, _ = k.shape
         kd = (orig_k - 1) * d + 1
-        # [FIX 2] tạo thẳng tensor K×K, căn giữa đúng — không dùng F.pad
-        out    = torch.zeros((c, m, self.K, self.K),
-                             device=kernel.device, dtype=kernel.dtype)
-        offset = (self.K - kd) // 2
-        out[:, :, offset : offset + kd : d,
-                   offset : offset + kd : d] = kernel
-        return out
-
+        sparse = torch.zeros((c, m, kd, kd), device=k.device)
+        sparse[:, :, ::d, ::d] = k
+        pad = (self.K - kd) // 2
+        return F.pad(sparse, [pad, pad, pad, pad])
 
 
 # =================================================================
@@ -151,14 +137,14 @@ class EfficientBlock(nn.Module):
 # 3. KIẾN TRÚC TỔNG THỂ SIMPLE_GLKA
 # =================================================================
 class Simple_GLKA(nn.Module):
-    def __init__(self, num_classes=2):
+    def __init__(self, num_classes=3):
         super(Simple_GLKA, self).__init__()
         
         self.stem = conv_bn_relu(3, 32, kernel_size=3, stride=2, padding=1)
 
         self.blocks = nn.Sequential(
             EfficientBlock(32, 32, stride=1, expansion_ratio=2, use_glka=False),
-            EfficientBlock(32, 64, stride=2, expansion_ratio=2, use_glka=True),
+            EfficientBlock(32, 64, stride=2, expansion_ratio=2, use_glka=False),
             EfficientBlock(64, 64, stride=1, expansion_ratio=2, use_glka=True),
             EfficientBlock(64, 128, stride=2, expansion_ratio=2, use_glka=True),
             EfficientBlock(128, 128, stride=1, expansion_ratio=2, use_glka=False),
@@ -186,23 +172,8 @@ class Simple_GLKA(nn.Module):
 # =================================================================
 if __name__ == "__main__":
     import copy
-    import sys
-    import os
-    
-    # Import config từ Train_AI folder
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    parent_dir = os.path.dirname(current_dir)
-    train_ai_dir = os.path.join(parent_dir, 'Train_AI')
-    if train_ai_dir not in sys.path:
-        sys.path.insert(0, train_ai_dir)
-    
-    try:
-        from config import config
-        num_classes = config.NUM_CLASSES
-    except:
-        num_classes = 2
 
-    model = Simple_GLKA(num_classes=num_classes).eval()
+    model = Simple_GLKA(num_classes=3).eval()
     
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Kiến trúc GLKA Net")
