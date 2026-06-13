@@ -22,14 +22,14 @@ class Config:
     # =====================================================================
     IMG_SIZE = 224
     BATCH_SIZE = 32
-    EPOCHS = 25
+    EPOCHS = 40
     
     # =====================================================================
     # 4. OPTIMIZER CONFIGURATION (ĐÃ FIX CHO CẢ SGD VÀ ADAMW)
     # =====================================================================
-    OPTIMIZER_TYPE = "AdamW"  # Bạn chỉ cần đổi giữa "SGD" hoặc "AdamW" ở đây
+    OPTIMIZER_TYPE = "SGD"  # Bạn chỉ cần đổi giữa "SGD" hoặc "AdamW" ở đây
     _SGD_CONFIG = {
-        "lr": 0.01,           # SGD cần learning rate lớn hơn
+        "lr": 0.015,           # SGD cần learning rate lớn hơn
         "momentum": 0.9,
         "weight_decay": 5e-4  
     }

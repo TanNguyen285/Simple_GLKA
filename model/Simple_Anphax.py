@@ -168,7 +168,7 @@ class Simple_GLKA(nn.Module):
         self.classifier_pool = nn.AdaptiveAvgPool2d(1)
         self.classifier_fc = nn.Sequential(
             nn.Flatten(),
-            nn.Dropout(p=0.3),
+            nn.Dropout(p=0.1),
             nn.Linear(256, num_classes)
         )
 

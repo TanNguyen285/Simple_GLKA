@@ -230,3 +230,4 @@ dataset/val/*/*
 
 # Cho phép lấy mọi ảnh bắt đầu bằng chữ 'val' nằm trong các class của val/
 !dataset/val/*/val*
+data/*

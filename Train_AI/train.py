@@ -271,7 +271,7 @@ def train_model():
         f.write(f"  Classes      : {class_names}\n")
         f.write(f"\n{'='*80}\n")
 
-    # ========== TRAINING LOOP ==========
+# ========== TRAINING LOOP ==========
     for epoch in range(EPOCHS):
         print(f"\n{'='*60}")
         print(f"Epoch {epoch + 1}/{EPOCHS}")
@@ -353,10 +353,29 @@ def train_model():
 
         plot_training_curves(history_train_loss, history_val_loss, history_val_acc, SAVE_DIR)
 
+    # ========== EXPORT DEPLOY MODEL (reparameterized) ==========
+    import copy
+    print("\n[*] Đang reparameterize và lưu deploy model...")
+
+    for src_name, dst_name in [('best_acc.pth', 'best_acc_deploy.pth'),
+                                ('best_loss.pth', 'best_loss_deploy.pth')]:
+        src_path = os.path.join(SAVE_DIR, src_name)
+        dst_path = os.path.join(SAVE_DIR, dst_name)
+
+        deploy_model = copy.deepcopy(model)
+        deploy_model.load_state_dict(
+            torch.load(src_path, map_location=DEVICE, weights_only=True)
+        )
+        for m in deploy_model.modules():
+            if hasattr(m, 'switch_to_deploy'):
+                m.switch_to_deploy()
+        deploy_model.eval()
+        torch.save(deploy_model.state_dict(), dst_path)
+        print(f"  [✓] {dst_name}")
+
     print(f"\n{'='*60}")
     print(f"[✓] Hoàn thành training! Kết quả lưu tại: {SAVE_DIR}")
     print(f"{'='*60}")
-
 
 if __name__ == "__main__":
     train_model()

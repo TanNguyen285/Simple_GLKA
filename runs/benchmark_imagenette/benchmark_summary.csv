@@ -1,0 +1,5 @@
+name,params_M,gflops,best_top1,final_top1,final_top5,latency_ms,seed
+Simple_GLKA (ours),0.274,0.393,92.13,92.13,99.29,1.882,42
+MobileNetV2,2.237,0.326,92.74,92.74,99.31,3.979,42
+EfficientNet-B0,4.02,0.414,92.74,92.74,99.26,7.674,42
+RepVGG-A0,7.835,1.868,91.34,91.31,99.18,1.876,42

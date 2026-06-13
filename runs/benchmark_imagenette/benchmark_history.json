@@ -1,0 +1,51 @@
+[
+  {
+    "run_id": 1,
+    "timestamp": "2026-06-14 04:22:11",
+    "device": "cuda",
+    "dataset": "ImageNette-v2  224×224  10-class",
+    "seed": 42,
+    "results": [
+      {
+        "name": "Simple_GLKA (ours)",
+        "params_M": 0.274,
+        "gflops": 0.393,
+        "best_top1": 92.13,
+        "final_top1": 92.13,
+        "final_top5": 99.29,
+        "latency_ms": 1.882,
+        "seed": 42
+      },
+      {
+        "name": "MobileNetV2",
+        "params_M": 2.237,
+        "gflops": 0.326,
+        "best_top1": 92.74,
+        "final_top1": 92.74,
+        "final_top5": 99.31,
+        "latency_ms": 3.979,
+        "seed": 42
+      },
+      {
+        "name": "EfficientNet-B0",
+        "params_M": 4.02,
+        "gflops": 0.414,
+        "best_top1": 92.74,
+        "final_top1": 92.74,
+        "final_top5": 99.26,
+        "latency_ms": 7.674,
+        "seed": 42
+      },
+      {
+        "name": "RepVGG-A0",
+        "params_M": 7.835,
+        "gflops": 1.868,
+        "best_top1": 91.34,
+        "final_top1": 91.31,
+        "final_top5": 99.18,
+        "latency_ms": 1.876,
+        "seed": 42
+      }
+    ]
+  }
+]
