@@ -1,0 +1,5 @@
+name,loaded_ckpt,params_M,gflops,top1,top5,latency_ms,fps
+MobileNetV2,True,2.237,0.326,92.74,99.31,4.082,245.0
+EfficientNet-B0,True,4.02,0.414,92.74,99.26,6.501,153.8
+Simple_GLKA (ours),True,0.302,0.452,92.1,99.29,2.157,463.6
+RepVGG-A0,True,7.036,1.665,91.34,99.18,1.759,568.4
